@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>x-bot</title>
+  <link rel="stylesheet" href="/style.css">
+  <!-- Inline, not a file under /data: there is no backend yet to serve one, and
+       a 404 in the network tab on every load is noise the operator learns to
+       ignore — which is how a real one gets missed. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0e17'/%3E%3Cpath d='M9 9l14 14M23 9L9 23' stroke='%231D9BF0' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- Icon set, defined once and referenced with <use>. Inline sprite rather than
+     an icon font or a CDN: the page must stay self-contained, and repeating a
+     dozen path definitions per button is what makes markup unreadable. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-user"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></g>
+    <g id="i-scan"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/></g>
+    <g id="i-db"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></g>
+    <g id="i-megaphone"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></g>
+    <g id="i-gear"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M4.2 4.2l2.1 2.1m11.4 11.4 2.1 2.1M2 12h3m14 0h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></g>
+    <g id="i-mail"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></g>
+    <g id="i-users"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></g>
+    <g id="i-plus"><path d="M5 12h14M12 5v14"/></g>
+    <g id="i-save"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></g>
+    <g id="i-eye"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></g>
+    <g id="i-send"><path d="m22 2-7 20-4-9-9-4 20-7z"/></g>
+    <g id="i-trash"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></g>
+    <g id="i-search"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></g>
+    <g id="i-check"><path d="M20 6 9 17l-5-5"/></g>
+    <g id="i-login"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></g>
+    <g id="i-logout"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></g>
+    <g id="i-external"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/></g>
+    <g id="i-download"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></g>
+    <g id="i-sparkles"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/></g>
+    <g id="i-pause"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></g>
+    <g id="i-stop"><rect x="5" y="5" width="14" height="14" rx="2"/></g>
+    <g id="i-reset"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></g>
+    <g id="i-x"><path d="M18 6 6 18M6 6l12 12"/></g>
+    <g id="i-image"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></g>
+    <g id="i-upload"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></g>
+    <g id="i-list"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></g>
+    <g id="i-panel"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M14 3v18"/></g>
+    <g id="i-clock"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></g>
+    <g id="i-chat"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V8a4 4 0 0 1 4-4h6a8 8 0 0 1 8 8z"/></g>
+    <g id="i-dots"><circle cx="12" cy="12" r="9"/><path d="M8 12h.01M12 12h.01M16 12h.01"/></g>
+    <g id="i-home"><path d="M3 10.5 12 3l9 7.5M5 9.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5"/></g>
+    <g id="i-bell"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></g>
+
+    <!-- X's own vocabulary. A scrape here is aimed at a follower list, the
+         likers of one post, or the results of a search, and the board names
+         which by drawing it — see MODE_ICONS in app.js. A generic "list" mark
+         three times over is a summary the operator has to read the label off
+         every time. -->
+    <g id="i-at"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9"/></g>
+    <g id="i-hash"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></g>
+    <g id="i-heart"><path d="M20.8 5.6a5 5 0 0 0-7.1 0L12 7.3l-1.7-1.7a5 5 0 1 0-7.1 7.1l8.8 8.7 8.8-8.7a5 5 0 0 0 0-7.1z"/></g>
+    <g id="i-repeat"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></g>
+    <g id="i-target"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></g>
+    <!-- The disclosure arrow on a filter group. Points right when the group is
+         shut and down when it is open - the rotation is one CSS rule, so there
+         is one mark here rather than two. -->
+    <g id="i-chevron"><path d="m9 6 6 6-6 6"/></g>
+    <g id="i-quote"><path d="M9 7H6a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1a3 3 0 0 0 3-3V7c0 2.8-.7 4.6-2 5.5M20 7h-3a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1a3 3 0 0 0 3-3V7c0 2.8-.7 4.6-2 5.5"/></g>
+  </defs>
+</svg>
+
+<header class="bar">
+  <!-- The mark is drawn, not loaded. Same reason as the favicon: with no
+       backend there is nothing serving /data, and a broken image in the header
+       is the first thing anybody opening this app would see. -->
+  <!-- The wordmark is ONE element. Bare text in a flex container becomes its own
+       anonymous flex item, so without this wrapper the h1's gap (there for the
+       mark) also opens up between "x" and "-bot". -->
+  <h1><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32"
+        height="32" rx="7" fill="#151b26"/><path d="M9 9l14 14M23 9L9 23"
+        stroke="#1D9BF0" stroke-width="3.4" stroke-linecap="round"
+        fill="none"/></svg><span
+      class="wordmark">x<span class="accent">-bot</span></span></h1>
+
+  <!-- Campaign first: it is the job everything else feeds. The others are what
+       you set up once, this is what you come back to. -->
+  <nav class="tabs" id="tabs">
+    <button data-panel="campaign" class="on"><svg class="ic" viewBox="0 0 24 24"><use href="#i-megaphone"/></svg>Campaign</button>
+    <button data-panel="accounts"><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Accounts</button>
+    <button data-panel="scraping"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scan"/></svg>Scraping</button>
+    <button data-panel="actions"><svg class="ic" viewBox="0 0 24 24"><use href="#i-panel"/></svg>Actions</button>
+    <button data-panel="data"><svg class="ic" viewBox="0 0 24 24"><use href="#i-db"/></svg>Data</button>
+    <button data-panel="settings"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gear"/></svg>Settings</button>
+  </nav>
+
+  <div class="pills">
+    <button class="pill" id="pill-store" title="Store status — click to see its log">
+      <i class="dot"></i><span>store …</span></button>
+    <span class="pill" id="pill-browser"><i class="dot"></i><span>browser …</span></span>
+    <!-- The bucket a finished roster is sent to. Hidden entirely when no MinIO
+         is configured: the console works without one, and a permanently grey
+         pill for a thing nobody asked for is noise on every panel. -->
+    <span class="pill" id="pill-minio" hidden><i class="dot"></i><span>minio …</span></span>
+    <span class="pill run" id="pill-run">idle</span>
+    <button class="icon-btn" id="feed-toggle" aria-pressed="true"
+            title="Show or hide the activity feed">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-panel"/></svg></button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Accounts ─────────────────────────────────────────────── -->
+  <section class="panel" data-panel="accounts">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg></span>
+        <h2>Accounts</h2>
+        <div class="grow"></div>
+        <span class="muted" id="sessions-count"></span>
+        <button id="acc-check"><svg class="ic" viewBox="0 0 24 24"><use href="#i-check"/></svg>Check login status</button>
+      </div>
+      <!-- Handle AND email, not one field for both. X takes either at the login
+           box but sends its verification challenge to the address, and a run
+           that cannot answer that challenge stops dead — so both are stored up
+           front rather than asked for at the worst possible moment. -->
+      <form id="acc-add" class="inline">
+        <input name="login" placeholder="@username" required>
+        <input name="email" placeholder="Email (for verification)">
+        <!-- Not required. An account signed in through Google has no password
+             on this side at all, and demanding one here made the console ask
+             for a secret it would never use. Leave it blank and use the card's
+             Sign in & save. -->
+        <input name="password" type="password" placeholder="Password (blank for Google sign-in)">
+        <button type="submit"><svg class="ic" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add</button>
+      </form>
+
+      <div id="account-cards" class="acct-grid"></div>
+    </div>
+  </section>
+
+  <!-- ── Scraping ─────────────────────────────────────────────── -->
+  <!-- One card holding three things: the button that runs the walk, the number
+       it has reached, and the accounts themselves.
+
+       Everything this panel used to carry around them described the run instead
+       of being it. The bar above all: a walk with no end has no total to be a
+       fraction of, so the bar was a loop pretending to be progress — and the
+       count below it was already the honest version of the same fact. The two
+       tiles restated what the panel's own title says (it reads Home, it hovers
+       every account); the footer counted the rows the count above it had
+       counted; the note under the buttons explained a button with one meaning.
+       What is left is the run, the number, and the roster. -->
+  <section class="panel" data-panel="scraping">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-scan"/></svg></span>
+        <h2>Scraping</h2>
+        <!-- The count, next to the title rather than in a tile of its own. It is
+             one number and it is the only one there is to give, so it reads as
+             part of the heading instead of as a panel of statistics. -->
+        <span class="scrape-count"><strong id="sum-total">0</strong> accounts</span>
+        <div class="grow"></div>
+        <!-- Scrape and Stop are one control in two states: only one of them is
+             ever on screen, so which is showing IS the answer to whether a walk
+             is going. That is what the bar used to be for. -->
+        <!-- Live from the start. It is off only while a walk is going, or with
+             nothing ticked above; whether a browser window is actually up is the
+             server's answer to give, and it gives it when the button is pressed.
+             The label counts the ticked accounts — see paintRunButtons. -->
+        <button id="pipe-auto" class="primary">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-sparkles"/></svg>
+          <span id="pipe-auto-label">Scrape Home</span></button>
+        <button id="pipe-stop" class="tiny" hidden
+                title="End the walk. It stops between accounts, and everything collected so far is already saved.">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg>Stop</button>
+      </div>
+
+      <!-- Which windows this run walks. Every open account is a chip and every
+           chip is a tick: three open and two lit means two feeds walked side by
+           side and the third left alone, which is the point of having opened
+           three. Lit is the default — a window that has just been opened joins
+           the next run unless it is turned off, because the reason it was opened
+           is almost always that it is meant to work.
+
+           It doubles as the per-account count while a run is going. That is the
+           one thing a single total cannot say: whether all the lanes are
+           walking, or one of them stalled twenty rows in and the number is
+           climbing on the strength of the others. -->
+      <div class="active-strip lanes" id="scrape-accounts"></div>
+
+      <!-- The roster. A table, not chips: four things have to be readable per
+           account — who they are, what they say they are, how big they are, and
+           whether a DM can reach them — and only a column each keeps them
+           readable down a list of a thousand. The whole of it scrolls inside the
+           board rather than paging, with the header row staying put. -->
+      <div class="pipe-board">
+        <div id="pipe-mem-wrap" class="mem-table-wrap">
+          <table id="pipe-mem-table" class="mem-table">
+            <!-- Bio is the reason the walk hovers at all. It comes off the card
+                 X pops up — the line under the username — and it is what tells a
+                 real estate account from a crypto one at a glance, which is the
+                 whole judgement a roster is read for. It gets the flexible
+                 column; the three beside it are fixed. -->
+            <thead><tr>
+              <th class="c-n">#</th>
+              <th class="c-acct"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Account</th>
+              <th class="c-bio"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-quote"/></svg>Bio</th>
+              <th class="c-followers"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-users"/></svg>Followers</th>
+              <th class="c-dm"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-mail"/></svg>DMs</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ── Actions ──────────────────────────────────────────────── -->
+  <!-- X's own left-hand menu, mirrored: each button presses that item in the
+       live browser window, the way a click on the real sidebar would. Like
+       Scraping it drives the open window, so it is gated the same way — nothing
+       to press until an account is open. -->
+  <section class="panel" data-panel="actions">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-panel"/></svg></span>
+        <h2>Actions</h2>
+        <div class="grow"></div>
+        <!-- Every item in turn, top to bottom, with a gap between them. Watched
+             through the same run bar the scrape uses. -->
+        <button id="act-all" class="primary" disabled
+                title="Press every menu item in turn, in the open window">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-sparkles"/></svg>
+          Click all</button>
+      </div>
+
+      <!-- The same gate as Scraping. These press the live browser window, so
+           there is nothing for them to do until an account is open. Exactly one
+           of the two boxes is on screen: the ask, or the account it runs as. -->
+      <div class="gate" id="act-gate">
+        <span class="gate-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-login"/></svg></span>
+        <div class="gate-text">
+          <strong>Open an account first</strong>
+          <span>Each button here presses that item in X's own left-hand menu, in
+            the live browser window. Go to <b>Accounts</b> and press the open
+            icon
+            <svg class="ic gate-hint-ic" viewBox="0 0 24 24"><use href="#i-external"/></svg>
+            on the account you want to drive — the buttons switch on as soon as
+            that window is up.</span>
+        </div>
+        <div class="grow"></div>
+        <button id="act-open-accounts" class="primary">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Go to Accounts</button>
+      </div>
+
+      <div class="active-strip" id="act-ready" hidden></div>
+
+      <!-- One button per menu item, drawn from ACTIONS in app.js so the order
+           and the icons match X's rail. -->
+      <div class="act-grid" id="act-grid"></div>
+    </div>
+  </section>
+
+  <!-- ── Data ─────────────────────────────────────────────────── -->
+  <section class="panel" data-panel="data">
+
+    <!-- One row per ACCOUNT, read out of the STORE, and nothing above it.
+
+         The store, not the saved sweeps. A sweep is keyed by target and mode and
+         is REPLACED every time that target is walked again, so the sweeps on file
+         are the latest walk of each — while the store keeps everyone ever seen.
+         Reading the sweeps here made the panel say "193 collected" on a store
+         holding 1,290, which read as "this is everything you have" and was not.
+         Which sweeps still exist is a separate question, answered beside the
+         count and by the Delete button.
+
+         Four things per row: who they are, what they say they are, what that
+         makes them, and how big. The category is derived from the bio rather
+         than collected - it is what turns four hundred bios into a column that
+         can actually be filtered. -->
+    <div class="card data-card">
+      <div class="card-head">
+        <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg></span>
+        <h2>Handles &amp; bios</h2>
+        <span class="muted" id="acct-count"></span>
+        <div class="grow"></div>
+
+        <!-- Which target to look inside. By target NAME, because that is what a
+             stored row records — it says it came off "@naval", not off
+             "naval-followers" — and counted out of the store, so these numbers
+             add up to the head count. A target still listed here with its sweep
+             long since deleted is the point: the handles are still collected. -->
+        <label class="acct-from">From
+          <select id="acct-roster"><option value="">All targets</option></select>
+        </label>
+        <label class="acct-from">Category
+          <select id="acct-cat"><option value="">Any</option></select>
+        </label>
+        <input id="acct-search" class="acct-search" type="search"
+               placeholder="handle or bio…" aria-label="Filter by handle or bio">
+
+        <!-- The actions that used to hang off each overview row, now working on
+             whatever the pickers above have left standing - which is better than
+             per-roster was: a download can be one category out of one scrape. -->
+        <button id="acct-reload" class="tiny" title="Read the store again">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-reset"/></svg></button>
+        <button id="acct-download" class="tiny" title="Download what is shown, tab-separated">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-download"/></svg></button>
+        <button id="acct-minio" class="tiny" title="Send what is shown to MinIO">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg></button>
+        <!-- The title is rewritten as the picker moves - see renderAccounts -
+             because what this deletes depends on whether the picked target still
+             has a sweep on file at all. -->
+        <button id="acct-drop" class="tiny danger" disabled
+                title="Pick a target above to delete its saved sweep">
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg></button>
+      </div>
+
+      <div class="mem-table-wrap acct-wrap">
+        <table id="acct-table" class="mem-table">
+          <thead><tr>
+            <th class="c-n">#</th>
+            <th class="c-acct"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Account</th>
+            <th class="c-cat"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-list"/></svg>Category</th>
+            <th class="c-bio"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-quote"/></svg>Bio</th>
+            <th class="c-followers"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-users"/></svg>Followers</th>
+            <th class="c-dm"><svg class="ic th-ic" viewBox="0 0 24 24"><use href="#i-mail"/></svg>DMs</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="board-foot">
+        <span class="pager-info" id="acct-info"></span>
+        <div class="grow"></div>
+        <button id="acct-more" class="tiny" hidden>Show the rest</button>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ── Campaign ─────────────────────────────────────────────── -->
+  <!-- A wizard, not five loose cards: the steps have a real order (you cannot
+       pick recipients before choosing an account, or send before writing a
+       draft), and a numbered rail down the left is what makes that order
+       visible instead of something the operator has to already know. -->
+  <section class="panel on" data-panel="campaign">
+    <div class="wizard">
+
+      <nav class="steps" id="camp-steps">
+        <button data-step="login" class="on">
+          <span class="num">1</span>
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-login"/></svg>
+          <span class="label">Accounts</span><i class="tick"></i></button>
+        <button data-step="users">
+          <span class="num">2</span>
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-users"/></svg>
+          <span class="label">Recipients</span><i class="tick"></i></button>
+        <button data-step="messages">
+          <span class="num">3</span>
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-mail"/></svg>
+          <span class="label">Messages</span><i class="tick"></i></button>
+        <button data-step="media">
+          <span class="num">4</span>
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg>
+          <span class="label">Media</span><i class="tick"></i></button>
+        <button data-step="status">
+          <span class="num">5</span>
+          <svg class="ic" viewBox="0 0 24 24"><use href="#i-list"/></svg>
+          <span class="label">Status</span><i class="tick"></i></button>
+      </nav>
+
+      <div class="step-body">
+
+        <!-- 1 · Accounts -->
+        <div class="step on" data-step="login">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-login"/></svg></span>
+              <h2>Accounts</h2>
+              <div class="grow"></div>
+              <button id="camp-check"><svg class="ic" viewBox="0 0 24 24"><use href="#i-check"/></svg>Check session</button>
+              <button id="camp-login" class="primary"><svg class="ic" viewBox="0 0 24 24"><use href="#i-login"/></svg>Log in</button>
+            </div>
+            <!-- The accounts themselves, on the face of the step. A dropdown
+                 hid the one thing this step is about — which account, and what
+                 state its session is in — behind a click, and the answer to
+                 "which of these can I log in with" was one option at a time. -->
+            <div class="acct-row" id="camp-accounts"></div>
+            <!-- The cog, and nothing beside it any more.
+                 What used to sit here was a line estimating the split - "360
+                 recipients across 2 accounts, about 180 each" - and a strip
+                 listing the open windows. Both have been overtaken by the step
+                 itself: the row above lists ONLY accounts with a window open, so
+                 naming them again underneath said the same thing twice; and the
+                 split is no longer "about N each" - it follows how much room
+                 each account has left in the day, which the live panel shows
+                 exactly, per tab, before anything is sent. -->
+            <div class="acct-note">
+              <button id="camp-cog" class="icon-btn tiny" title="Campaign settings"
+                      aria-label="Campaign settings">
+                <svg class="ic" viewBox="0 0 24 24"><use href="#i-gear"/></svg></button>
+            </div>
+            <div id="camp-login-info" class="upload-info" hidden></div>
+            <div id="camp-session" class="session-card"></div>
+          </div>
+        </div>
+
+        <!-- 2 · Recipients -->
+        <div class="step" data-step="users">
+          <!-- Two ways in, one at a time: a file you brought, or what the
+               scraper has already collected. Both fill the same slot — the
+               recipient list — so showing them side by side asked the operator
+               to work out which of the two on screen was the live one. -->
+          <div class="card" id="users-upload-card">
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg></span>
+              <h2>Upload recipients</h2>
+              <div class="grow"></div>
+              <button id="users-import" hidden><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Save to account store</button>
+              <button id="users-database"><svg class="ic" viewBox="0 0 24 24"><use href="#i-db"/></svg>Database</button>
+            </div>
+
+            <label class="dropzone" id="users-drop" for="users-file">
+              <svg class="ic big" viewBox="0 0 24 24"><use href="#i-upload"/></svg>
+              <strong>Drop a file here, or click to choose</strong>
+              <span class="muted">csv · tsv · txt · xlsx — a column of @handles</span>
+              <input type="file" id="users-file" accept=".csv,.tsv,.tab,.txt,.list,.xlsx,.xlsm" hidden>
+            </label>
+            <div id="users-upload-info" class="upload-info" hidden></div>
+            <div id="users-upload-preview" class="preview-table" hidden></div>
+          </div>
+
+          <!-- Everyone the scraper has ever collected, read straight out of the
+               account store. Searchable, range-selectable, and the source a run
+               sends to — what is on screen is who gets messaged. -->
+          <div class="card" id="users-store-card" hidden>
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-db"/></svg></span>
+              <h2>Scraped accounts</h2>
+              <span class="src-tag" title="Read from the account store">store · accounts</span>
+              <div class="grow"></div>
+              <span class="muted" id="store-count"></span>
+              <!-- For a store filled before display names were kept on the way
+                   in. The target rosters held them all along, so this reads
+                   those and fills in the rows showing a bare handle. -->
+              <button id="store-names" class="tiny"
+                      title="Fill in missing display names from the stored rosters">
+                <svg class="ic" viewBox="0 0 24 24"><use href="#i-user"/></svg>Get names</button>
+              <button id="store-reload" class="tiny"><svg class="ic" viewBox="0 0 24 24"><use href="#i-reset"/></svg>Reload</button>
+              <button id="users-upload-back" class="tiny"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Upload a file</button>
+            </div>
+            <!-- Table left, every knob that narrows it in one rail down the
+                 right. Strung across the top these controls wrapped onto three
+                 lines and pushed the table itself off the bottom of the card;
+                 in a column they read as one list of questions about the same
+                 thing.
+
+                 Nothing here takes effect as it is touched. A category, a
+                 send-count and a range are one question asked together, and a
+                 list that re-cut itself under the cursor between them made the
+                 row numbers the range counts in a moving target. OK commits the
+                 lot — and what is on screen after it is who a run sends to. -->
+            <div class="store-body">
+              <div id="store-wrap" class="store-wrap">
+                <table class="store-table" id="store-table">
+                  <thead><tr>
+                    <th class="c-n">#</th>
+                    <th>Account</th>
+                    <th class="c-cat">Category</th>
+                    <th class="c-cats">Target</th>
+                    <th class="c-groups">Bio</th>
+                    <th class="c-dm">DMs</th>
+                    <th class="c-used">Messaged</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+
+              <aside class="store-filters" id="store-filters">
+                <div class="sf-head">
+                  <svg class="ic" viewBox="0 0 24 24"><use href="#i-search"/></svg>
+                  <strong>Filters</strong>
+                  <div class="grow"></div>
+                  <!-- What OK would leave standing, counted as the controls are
+                       touched. Staged filters with no preview are a guess
+                       followed by an undo; this one line answers live. -->
+                  <span class="sf-pending" id="store-pending"></span>
+                </div>
+
+                <!-- One <details> per filter, so any of them folds away and
+                     the rest keep their place. Native rather than a class and a
+                     click handler: <summary> is already a button to a screen
+                     reader, already answers Enter and Space, and already carries
+                     its own open state - all of which would have to be rebuilt,
+                     worse, to get an arrow that rotates.
+
+                     All six start SHUT. Open, they are a column taller than
+                     the table beside them, and the answer to "which of these is
+                     on" was six controls to read rather than six lines. Shut,
+                     the rail IS that answer - every group says what it is set to
+                     on its own summary line, so a filter you cannot see is still
+                     a filter you can read. Which is the thing that matters here:
+                     what this rail leaves standing is who gets messaged. -->
+                <details class="sf-group" data-group="search">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Search</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <input type="search" id="store-search" placeholder="handle, name or bio">
+                  </div>
+                </details>
+
+                <!-- What the bio says the account IS, read off its own words
+                     rather than off where it was scraped. This is the one a
+                     list gets aimed with: a draft written for realtors goes to
+                     Real estate, not to everyone off a realtor's followers. -->
+                <details class="sf-group" data-group="category">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Category</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <select id="store-category"></select>
+                  </div>
+                </details>
+
+                <!-- The targets these accounts were scraped off — where they
+                     came FROM, as against what they ARE above. -->
+                <details class="sf-group" data-group="target">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Target</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <select id="store-cat"></select>
+                  </div>
+                </details>
+
+                <!-- How many DMs this handle has already had out of here. Tick
+                     several: "never, or once" is the ordinary second pass over
+                     a list, and one dropdown could only ask for one of them. -->
+                <details class="sf-group" data-group="times">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Already messaged</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <div class="sf-chips" id="store-times"></div>
+                  </div>
+                </details>
+
+                <!-- Two switches, one group: both answer "who is allowed in the
+                     list at all" rather than narrowing it to a kind of account,
+                     and a fold apiece for one checkbox would be a fold that
+                     saves nothing. -->
+                <details class="sf-group" data-group="include">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Include</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <!-- A DM to a closed inbox fails and still spends the day's
+                         cap, so this is a switch rather than something to
+                         remember. -->
+                    <label class="sf-check"><input type="checkbox" id="store-open-dm"> Open DMs only</label>
+                    <!-- On by default: a bio nothing matched is a handle nobody
+                         can say anything about, and a campaign aimed at a
+                         category should not quietly carry them along. Off shows
+                         the store whole — an uploaded file of bare handles has
+                         no bios to read and would otherwise come up empty,
+                         which reads as broken. -->
+                    <label class="sf-check"><input type="checkbox" id="store-cat-only" checked> Categorised only</label>
+                  </div>
+                </details>
+
+                <!-- Ticking 200 of 291 by hand is not a thing anybody does, so
+                     there are no ticks: the range IS the selection, counted down
+                     whatever the filters above leave standing. -->
+                <details class="sf-group" data-group="rows">
+                  <summary>
+                    <svg class="sf-arrow ic" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+                    <span class="sf-name">Rows</span>
+                    <span class="sf-value"></span>
+                  </summary>
+                  <div class="sf-body">
+                    <div class="sf-row">
+                      <input type="number" id="store-from" min="1" placeholder="from"
+                             title="First row, counting what the filters left standing">
+                      <span class="rng-dash">–</span>
+                      <input type="number" id="store-to" min="1" placeholder="to"
+                             title="Last row, inclusive">
+                    </div>
+                  </div>
+                </details>
+
+                <!-- Outside every fold on purpose. This is not a control, it
+                     is the reason the table is shorter than the store is - and
+                     with the groups shut by default, an operator who has just
+                     uploaded four hundred bare handles would otherwise meet an
+                     empty table and no explanation anywhere on screen. -->
+                <span class="sf-note" id="store-hidden-note" hidden></span>
+
+                <div class="sf-foot">
+                  <button id="store-clear" class="tiny">Reset</button>
+                  <div class="grow"></div>
+                  <button id="store-range" class="primary"><svg class="ic" viewBox="0 0 24 24"><use href="#i-check"/></svg>OK</button>
+                </div>
+              </aside>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 3 · Messages -->
+        <div class="step" data-step="messages">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-mail"/></svg></span>
+              <h2>Drafts</h2>
+              <!-- Which of the two lists is on screen - see paintDraftMode.
+                   Writing your own, or reading what is on file in the store and
+                   the x-messages bucket shared with the other bots here. -->
+              <span class="src-tag" id="draft-src" title="Yours, until Save drafts writes it to the store and the bucket">writing</span>
+              <!-- Either this step or Media may be skipped, never both: a send
+                   carrying no text and no picture is an empty message. Skipping
+                   one disables the other's switch. -->
+              <label class="skip" title="Send pictures only, with no text">
+                <input type="checkbox" id="skip-messages"> Skip
+              </label>
+              <div class="grow"></div>
+              <span class="muted" id="draft-count"></span>
+              <!-- Switches the editor between the two lists. What is already
+                   on file stays out of the way until it is asked for: opening
+                   this step to write a message should not mean reading eight you
+                   wrote last month first. Pressing it again gives your own back,
+                   exactly as you left it - neither list is thrown away.
+                   The label says what the press DOES, so it changes with the
+                   mode; the span is what paintDraftMode rewrites. -->
+              <button id="draft-toggle" aria-expanded="false" aria-controls="drafts">
+                <svg class="ic" viewBox="0 0 24 24"><use href="#i-list"/></svg><span class="lbl">Stored drafts</span></button>
+              <button id="draft-add"><svg class="ic" viewBox="0 0 24 24"><use href="#i-plus"/></svg>Add draft</button>
+              <button id="draft-save" class="primary"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Save drafts</button>
+            </div>
+            <!-- The upload is an icon in the corner of the text box, not a card
+                 of its own: importing a file is a thing you do once, and it was
+                 taking more room than the editor it feeds. The box itself is
+                 still the drop target. -->
+            <input type="file" id="msg-file" accept=".txt,.csv,.tsv,.tab,.xlsx,.xlsm" hidden>
+            <div id="drafts"></div>
+            <div id="msg-upload-info" class="upload-info" hidden></div>
+          </div>
+
+        </div>
+
+        <!-- 4 · Media -->
+        <!-- Two ways in, one at a time, like step 2: images you bring, or the
+             ones already stored. The library is behind a button because opening
+             this step to attach a new picture should not mean loading every one
+             you have ever uploaded first. -->
+        <div class="step" data-step="media">
+          <div class="card" id="media-upload-card">
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg></span>
+              <h2>Upload media</h2>
+              <label class="skip" title="Send text only, with no picture">
+                <input type="checkbox" id="skip-media"> Skip
+              </label>
+              <div class="grow"></div>
+              <button id="media-library"><svg class="ic" viewBox="0 0 24 24"><use href="#i-db"/></svg>Library</button>
+            </div>
+            <label class="dropzone" id="media-drop" for="media-file">
+              <svg class="ic big" viewBox="0 0 24 24"><use href="#i-image"/></svg>
+              <strong>Drop images here, or click to choose</strong>
+              <span class="muted">png · jpg · gif · webp</span>
+              <input type="file" id="media-file" accept="image/*" multiple hidden>
+            </label>
+            <div id="media-upload-info" class="upload-info" hidden></div>
+          </div>
+
+          <div class="card" id="media-library-card" hidden>
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-image"/></svg></span>
+              <h2>Library</h2>
+              <span class="src-tag" title="Read from the media store">store · media</span>
+              <div class="grow"></div>
+              <span class="muted" id="media-count"></span>
+              <button id="media-reload" class="tiny"><svg class="ic" viewBox="0 0 24 24"><use href="#i-reset"/></svg>Reload</button>
+              <button id="media-upload-back" class="tiny"><svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg>Upload</button>
+            </div>
+            <div id="media-grid" class="media-grid"></div>
+          </div>
+        </div>
+
+        <!-- 5 · Status -->
+        <div class="step" data-step="status">
+          <div class="card">
+            <div class="card-head">
+              <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-list"/></svg></span>
+              <h2>Status</h2>
+              <div class="grow"></div>
+              <button id="camp-refresh"><svg class="ic" viewBox="0 0 24 24"><use href="#i-reset"/></svg>Re-check</button>
+            </div>
+            <ul class="checklist" id="camp-checklist"></ul>
+            <!-- One button. It is off until every mandatory line above is
+                 ticked, and the line beside it names what is still missing —
+                 a disabled button that does not say why is a dead end. -->
+            <div class="row">
+              <button id="camp-start" class="danger" disabled>
+                <svg class="ic" viewBox="0 0 24 24"><use href="#i-send"/></svg>Start campaign</button>
+              <!-- Opens itself on Start. Here as well, because a panel that can
+                   only be reached by starting a campaign is one you cannot get
+                   back to after closing it mid-run. -->
+              <button id="camp-live">
+                <svg class="ic" viewBox="0 0 24 24"><use href="#i-list"/></svg>Campaign live</button>
+              <span class="hint" id="camp-start-note"></span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Settings ─────────────────────────────────────────────── -->
+  <section class="panel" data-panel="settings">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gear"/></svg></span>
+        <h2>Settings</h2>
+        <div class="grow"></div>
+        <button id="set-reset"><svg class="ic" viewBox="0 0 24 24"><use href="#i-reset"/></svg>Reset to defaults</button>
+        <button id="set-save" class="primary"><svg class="ic" viewBox="0 0 24 24"><use href="#i-save"/></svg>Save</button>
+      </div>
+      <!-- Its own button rather than a checkbox down the list, because it is
+           the one setting that decides whether this app talks to anybody. It
+           saves on the press — a switch you have to remember to Save is a
+           switch that is sometimes lying about what the next run will do. -->
+      <div class="set-toggle">
+        <span class="st-text">
+          <span class="st-name">Click Send</span>
+          <span class="st-help">On, a run sends. Off, it types the message,
+            attaches the image and leaves the DM composer for you to press
+            Send.</span>
+        </span>
+        <div class="grow"></div>
+        <button id="set-clicksend" class="toggle" aria-pressed="true">
+          <span class="dot"></span><span class="lbl">On</span></button>
+      </div>
+      <div id="settings-form" class="settings"></div>
+    </div>
+  </section>
+
+</main>
+
+<aside class="feed">
+  <div class="feed-head">
+    <strong>Activity</strong>
+    <div class="grow"></div>
+    <button id="feed-clear" class="tiny"><svg class="ic" viewBox="0 0 24 24"><use href="#i-trash"/></svg>Clear</button>
+    <button id="feed-close" class="icon-btn tiny" title="Hide the activity feed">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+  </div>
+  <ul id="feed"></ul>
+</aside>
+
+<!-- ── Campaign settings ──────────────────────────────────────────
+     The send's own knobs, reachable from the campaign screen instead of a
+     round trip to the Settings panel. The SAME stored values — this writes
+     through the same endpoint, so the two can never drift apart. -->
+<dialog id="camp-cog-box" class="cog">
+  <div class="row live-head">
+    <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gear"/></svg></span>
+    <strong>Campaign settings</strong>
+    <div class="grow"></div>
+    <button id="camp-cog-close" class="tiny">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg>Close</button>
+  </div>
+  <div id="camp-cog-body" class="cog-body"></div>
+  <div class="live-foot muted" id="camp-cog-foot">Saved as you change them.</div>
+</dialog>
+
+<!-- ── Campaign live ──────────────────────────────────────────────
+     One row per recipient, for the whole run: who, which draft, which picture,
+     and where that message has got to. The run itself owns the rows — it decides
+     the pairing before it sends anything — so this is that table polled, not a
+     guess reassembled on this side from a percentage. -->
+<dialog id="camp-live-box" class="live">
+  <div class="row live-head">
+    <span class="card-ic"><svg class="ic" viewBox="0 0 24 24"><use href="#i-megaphone"/></svg></span>
+    <strong>Campaign live</strong>
+    <span class="muted" id="camp-live-sub"></span>
+    <div class="grow"></div>
+    <div class="live-tally" id="camp-live-tally"></div>
+    <!-- Pause first, then choose. End is deliberately dead while the run is
+         going: ending a campaign is not undoable, and making it reachable only
+         from a stopped run means the decision is taken with the table holding
+         still rather than with rows landing under the cursor. -->
+    <button id="camp-pause" class="tiny" hidden>
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-pause"/></svg>
+      <span class="lbl">Pause</span></button>
+    <button id="camp-end" class="tiny danger" hidden disabled
+            title="Pause the campaign first">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-stop"/></svg>End campaign</button>
+    <button id="camp-live-close" class="tiny">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-x"/></svg>Close</button>
+  </div>
+  <!-- One tab per account the campaign is running from, each holding that
+       account's own recipients. Hidden with a single account: a tab strip of
+       one is a heading that looks like a choice. -->
+  <div class="live-tabs" id="camp-live-tabs" hidden></div>
+  <div class="live-wrap" id="camp-live-wrap">
+    <!-- The roster table's own look — same rows, same badges, same avatars, so
+         the live board and the pipeline's list are one language. -->
+    <table class="mem-table live-table" id="camp-live-table">
+      <thead><tr>
+        <th class="c-n">#</th><th>Account</th><th>Chat</th><th>DM</th><th>Media</th><th>Status</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="live-foot muted" id="camp-live-foot"></div>
+</dialog>
+
+<dialog id="store-log">
+  <div class="row"><strong>Store log</strong><div class="grow"></div>
+    <button id="store-log-close" class="tiny">close</button></div>
+  <pre id="store-log-body"></pre>
+</dialog>
+
+<!-- The stand-in for the backend, loaded FIRST so app.js's very first call
+     already has something to answer it. Deleting this one line is what hands the
+     app over to a real server — see the README. -->
+<script src="/mock.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

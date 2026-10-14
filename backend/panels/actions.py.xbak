@@ -1,0 +1,101 @@
+"""Panel - Actions.
+
+The buttons down the left of X itself, mirrored here: press Home, Explore,
+Notifications and the rest, and the open browser window follows exactly as a
+click in X's own sidebar would. `All` walks the lot in turn.
+
+Like Scraping, this drives the live browser window, so it needs one open - a
+press with no window fails with the same "No browser window is open" the scrape
+does, from the same `working_account`. Which item each key maps to, and how it
+is pressed, lives with every other x.com selector in `automation/x.py`; this
+file only decides which account the press lands on.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import Any
+
+from fastapi import APIRouter, Body
+
+from .. import tasks
+from ..automation import x
+from ..automation.browser import automation
+from ..events import log
+from ._common import as_at, fail, working_account
+
+router = APIRouter()
+
+
+@router.get("/api/actions")
+def list_actions() -> dict[str, Any]:
+    """The menu items, in the order they sit down X's rail - and Close.
+
+    Close is not on the rail; it is how you get back to it. X's panels sit OVER
+    the page, and while one is up every item behind it is unclickable, so the way
+    out belongs beside the things that open one.
+    """
+    return {"actions": [{"key": key, "label": entry["label"]}
+                        for key, entry in x.NAV_ACTIONS.items()]
+                       + [{"key": "close", "label": "Close"}]}
+
+
+@router.post("/api/actions/click")
+def click(body: dict = Body(default={})) -> dict[str, Any]:
+    """Press one item in the open window.
+
+    Fast enough to answer inline - one click and a page settle - so unlike the
+    sweep it is not a task. The window it uses is whichever is open, or the one
+    named in `session` when several are.
+    """
+    account = working_account(body.get("session"))
+    account_id = str(account["id"])
+    action = str(body.get("action") or "").strip()
+    if action != "close" and action not in x.NAV_ACTIONS:
+        raise fail(f"{action or 'nothing'} is not a menu item this can press.")
+
+    result = automation.with_page(
+        account_id, lambda page: x.click_action(page, action), timeout=120)
+    label = "Close" if action == "close" else x.NAV_ACTIONS[action]["label"]
+    log("actions", f"{result} {label} on {as_at(account)}")
+    return {"ok": True, "action": action, "result": result}
+
+
+@router.post("/api/actions/all")
+def click_all(body: dict = Body(default={})) -> dict[str, str]:
+    """Press every menu item in turn, with a rolled gap between them.
+
+    A task, not a held request: a dozen clicks each waiting on a page settle is
+    seconds of work. The gap is rolled rather than fixed for the same reason the
+    sweep's is - a burst of identical-interval clicks is a machine - and one item
+    that will not click is logged and stepped over rather than ending the run.
+    """
+    account = working_account(body.get("session"))
+    account_id = str(account["id"])
+    keys = list(x.NAV_ACTIONS)
+
+    def run(task: tasks.Task) -> None:
+        for index, key in enumerate(keys):
+            task.checkpoint()
+            label = x.NAV_ACTIONS[key]["label"]
+            task.set(detail=label, progress=index / len(keys))
+            try:
+                automation.with_page(
+                    account_id, lambda page, k=key: x.click_action(page, k), timeout=120)
+                log("actions", f"clicked {label} on {as_at(account)}")
+            except Exception as err:                 # noqa: BLE001 - one dud is not the set
+                log("actions", f"{label}: {err}", "warn")
+            task.set(progress=(index + 1) / len(keys))
+            if index + 1 < len(keys):
+                task.checkpoint(random.uniform(1.2, 3.0))
+
+        # And leave the window on the rail rather than under whatever the last
+        # item opened. Each press already clears the way in front of itself; this
+        # is so the window is usable when the walk finishes.
+        try:
+            automation.with_page(account_id, x.close_overlay, timeout=60)
+        except Exception as err:                     # noqa: BLE001 - tidying, not the run
+            log("actions", f"could not close the last panel: {err}", "warn")
+
+    task = tasks.start("clicking every menu item", run, source="actions")
+    return {"task": task.id}

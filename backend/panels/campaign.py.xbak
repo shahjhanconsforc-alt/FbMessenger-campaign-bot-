@@ -1,0 +1,681 @@
+"""Panel 1 - Campaign, and the two stores the wizard fills itself from.
+
+The wizard's five steps are accounts, recipients, drafts, media, status, so the
+drafts and the media library are answered here rather than in a panel of their
+own: they exist to be picked in step three and step four.
+
+Two things about the send that are decisions, not implementation details:
+
+  * The PAIRING is decided before anything is sent. Which account writes to whom
+    is fixed when the run starts and the lane table is that decision, not a
+    guess reassembled on the UI side from a percentage.
+  * The pacing is per ACCOUNT-DAY. X counts DMs per account, so the run holds a
+    daily tally per account and stops that lane when it is spent - a run that
+    only knew its own total would let three runs in one afternoon spend the same
+    budget three times over.
+
+There are only five statuses the console can draw: pending, processing, sent,
+typed, failed. A recipient that was passed over is therefore `failed` with the
+reason on the row, which is honest - it was not messaged - and visible, which
+"skipped" quietly dropped from the table would not be.
+"""
+
+from __future__ import annotations
+
+import random
+import re
+import threading
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body, File, UploadFile
+from fastapi.responses import FileResponse
+
+from .. import config, tasks
+from ..automation import x
+from ..automation.browser import automation, AutomationError
+from ..automation.x import DmClosed
+from ..events import log
+from ..storage import objects
+from ..store import now, store
+from ._common import fail, find_account
+
+router = APIRouter()
+
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_IMAGE = 15 * 1024 * 1024
+
+_campaign: dict[str, Any] = {"lanes": [], "state": "", "note": "", "task": None}
+_lock = threading.Lock()
+
+
+def _state() -> dict[str, Any]:
+    with _lock:
+        return {
+            "lanes": [{"account": lane["account"], "rows": [dict(r) for r in lane["rows"]]}
+                      for lane in _campaign["lanes"]],
+            "state": _campaign["state"],
+            "note": _campaign["note"],
+        }
+
+
+# -- Drafts --------------------------------------------------------
+@router.get("/api/messages")
+def messages() -> dict[str, Any]:
+    return {"drafts": store.read()["drafts"]}
+
+
+@router.post("/api/messages")
+def save_messages(body: dict = Body(default={})) -> dict[str, Any]:
+    drafts = [
+        {
+            "name": str(d.get("name") or "draft"),
+            "text": str(d.get("text") or ""),
+            "enabled": d.get("enabled") is not False,
+        }
+        for d in (body.get("drafts") or [])
+    ]
+    with store.edit() as db:
+        db["drafts"] = drafts
+    log("data", f"saved {len(drafts)} drafts")
+    return {"drafts": drafts}
+
+
+@router.get("/api/messages/minio")
+def messages_in_bucket() -> dict[str, Any]:
+    """The drafts on file in `x-messages`, seeding the bucket on a first read.
+
+    A GET that can create a bucket looks wrong for a moment. It is not: the
+    bucket and its seed are what "what is on file" MEANS the first time anybody
+    asks, and making the operator press an Import button before the Load button
+    would be asking them to know that this console had never talked to MinIO
+    before. `seeded_from` in the answer is how the panel says it happened.
+    """
+    found = objects.read_drafts()
+    if not found.get("ok"):
+        raise fail(found.get("reason") or "MinIO refused the read.", 502)
+    return found
+
+
+@router.post("/api/messages/minio")
+def push_messages(body: dict = Body(default={})) -> dict[str, Any]:
+    """Put drafts back into the bucket - the ones sent, or what is stored.
+
+    The other half of the round trip. Without it the bucket is a thing this
+    console reads from and never writes to, and the drafts an operator edits here
+    would be lost the next time it read.
+    """
+    drafts = body.get("drafts")
+    if not drafts:
+        drafts = store.read()["drafts"]
+    sent = objects.write_drafts(drafts)
+    if not sent.get("ok"):
+        raise fail(sent.get("reason") or "MinIO refused the write.", 502)
+    log("data", f"sent {len(drafts)} drafts to {sent.get('bucket')}")
+    return {**sent, "count": len(drafts)}
+
+
+@router.post("/api/messages/parse")
+async def parse_messages(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Blank-line separated, because a DM has line breaks in it.
+
+    One-per-line would cut every multi-paragraph message into pieces, and the
+    drafts worth importing in bulk are exactly the long ones.
+    """
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+
+    drafts = [
+        {"name": f"imported {i + 1}", "text": chunk.strip(), "enabled": True}
+        for i, chunk in enumerate(re.split(r"\r?\n\s*\r?\n", text))
+        if chunk.strip()
+    ]
+    return {"drafts": drafts}
+
+
+# -- Media ---------------------------------------------------------
+@router.get("/api/media")
+def media() -> dict[str, Any]:
+    return {"media": store.read()["media"]}
+
+
+@router.post("/api/media")
+async def upload_media(files: list[UploadFile] = File(...)) -> dict[str, int]:
+    config.ensure_dirs()
+    added = 0
+
+    for upload in files:
+        name = Path(upload.filename or "image").name
+        if Path(name).suffix.lower() not in IMAGE_TYPES:
+            raise fail(f"{name} is not an image X will accept.")
+        raw = await upload.read()
+        if len(raw) > MAX_IMAGE:
+            raise fail(f"{name} is larger than X will take on a DM.")
+
+        # Written to disk under its own name rather than kept as a data URI: the
+        # composer is fed a FILE, so an image that only existed as base64 in a
+        # JSON store would have to be written out at send time anyway.
+        target = config.MEDIA / name
+        stem, suffix, n = target.stem, target.suffix, 1
+        while target.exists():
+            target = config.MEDIA / f"{stem}-{n}{suffix}"
+            n += 1
+        target.write_bytes(raw)
+
+        with store.edit() as db:
+            db["media"] = [m for m in db["media"] if m["name"] != target.name]
+            db["media"].append({
+                "name": target.name,
+                "size": len(raw),
+                "url": f"/api/media/file/{target.name}",
+                "at": now(),
+            })
+        added += 1
+
+    log("data", f"uploaded {added} image(s)")
+    return {"added": added}
+
+
+@router.get("/api/media/file/{name}")
+def media_file(name: str) -> FileResponse:
+    """Serve one stored image back to the library grid.
+
+    `Path(name).name` and the existence check together are the whole of the path
+    handling: the name arrives from a URL, and `../../` in it must resolve to a
+    404 rather than to a file.
+    """
+    path = config.MEDIA / Path(name).name
+    if not path.is_file():
+        raise fail(f"{name} is not in the library.", 404)
+    return FileResponse(path)
+
+
+# -- Planning the send ---------------------------------------------
+def _dealer(items: list) -> Any:
+    """Draw at random, but from a bag that empties before it refills.
+
+    Plain `random.choice` per recipient is random and nothing else: over a
+    hundred recipients one draft lands forty times and another twice. That
+    matters here for two reasons - the drafts are ALTERNATIVES the sender
+    rotates between, so an uneven split is a worse test of which one works, and
+    four hundred DMs weighted onto one text is the pattern the rotation exists
+    to avoid.
+
+    So: shuffle, deal the whole set, shuffle again. Every draft is used the same
+    number of times give or take one, and the ORDER is unpredictable - which is
+    the half of "random" that actually matters against a machine watching for a
+    repeating pattern.
+    """
+    bag: list = []
+
+    def draw():
+        nonlocal bag
+        if not items:
+            return None
+        if not bag:
+            bag = list(items)
+            random.shuffle(bag)
+        return bag.pop()
+
+    return draw
+
+
+def _room_today(accounts: list[dict], settings: dict, counters: dict) -> dict[str, int]:
+    """How many more DMs each account may send today.
+
+    The cap is per account and X counts it per account, so this is the real
+    limit on a lane - not a preference. An account that has already sent 38 of
+    its 40 can take two more recipients, however many are waiting.
+    """
+    cap = int(settings["per_account_dm_cap"])
+    spent = counters.get("per_account") or {}
+    return {str(a["id"]): max(0, cap - int(spent.get(str(a["id"]), 0)))
+            for a in accounts}
+
+
+def _assign_lanes(lanes: list[dict], count: int, room: dict[str, int]) -> list[int]:
+    """Which lane each recipient in turn belongs to.
+
+    By ROOM LEFT, not in equal shares. Equal shares look fairer and are worse:
+    the run enforces the per-account cap at send time, so a hundred recipients
+    split 34/33/33 across three accounts - one of which has five sends left
+    today - queues twenty-nine DMs that can only come back "at its cap for
+    today". Dealing by room spends the capacity that exists.
+
+    With nothing sent yet the rooms are equal and this IS round-robin, one each
+    in turn, which is what it should be: the lanes only pull apart once the
+    accounts actually differ.
+
+    Recipients past the total room left are still dealt, round-robin, rather than
+    dropped. They will fail at send time with a reason on the row - and a
+    recipient visibly failing for a stated reason is better than one that
+    silently never appeared on the board at all.
+    """
+    left = [room.get(lane["id"], 0) for lane in lanes]
+    out: list[int] = []
+    for index in range(count):
+        # Most room first; a tie goes to the earlier lane, which keeps the deal
+        # stable rather than dependent on dict order.
+        best = max(range(len(lanes)), key=lambda j: (left[j], -j))
+        if left[best] <= 0:
+            out.append(index % len(lanes))
+            continue
+        left[best] -= 1
+        out.append(best)
+    return out
+
+
+def _plan_lanes(body: dict, db: dict) -> tuple[list[dict], list[dict]]:
+    """Who gets what, from whom - without sending anything.
+
+    Shared by `/plan` and `/start` so the run cannot disagree with the preview
+    that was approved: the same code deals the same rows, and the only thing
+    `/start` adds is a task to walk them.
+
+    Returns the lanes and the accounts they belong to.
+    """
+    account_ids = [str(i) for i in (body.get("accounts") or [])]
+    recipients = [str(h).lstrip("@") for h in (body.get("recipients") or []) if str(h).strip()]
+    if not account_ids:
+        raise fail("Pick an account to send from.")
+    if not recipients:
+        raise fail("No recipients.")
+
+    accounts = [find_account(i) for i in account_ids]
+
+    drafts_by_name = {d["name"]: d for d in db["drafts"]}
+    wanted = [] if body.get("skip_messages") else [
+        drafts_by_name[name] for name in (body.get("drafts") or []) if name in drafts_by_name
+    ]
+    if not body.get("skip_messages") and not wanted:
+        raise fail("No draft selected - tick Skip messages to send without one.")
+
+    media_names = [] if body.get("skip_media") else list(body.get("media") or [])
+    library = {m["name"]: m for m in db["media"]}
+    missing = [n for n in media_names if n not in library]
+    if missing:
+        raise fail(f"{missing[0]} is no longer in the media library.")
+
+    store_by_handle = {row["handle"]: row for row in db["store"]}
+    draw_draft = _dealer(wanted)
+    draw_media = _dealer(media_names)
+
+    lanes = [{"account": "@" + a["login"], "id": str(a["id"]), "rows": []} for a in accounts]
+    # Which account sends to whom is NOT random and not an equal split: it is
+    # whatever room each account has left in the day. See `_assign_lanes`.
+    room = _room_today(accounts, store.settings(), store.counters())
+    where = _assign_lanes(lanes, len(recipients), room)
+
+    for index, handle in enumerate(recipients):
+        known = store_by_handle.get(handle, {})
+        draft = draw_draft()
+        lane = lanes[where[index]]
+        lane["rows"].append({
+            "handle": handle,
+            "name": known.get("name") or "",
+            # The NAME rides on the row and the text with it: the console
+            # shows which draft a recipient got, and the rendered text is
+            # what the tooltip holds.
+            "draft": draft["name"] if draft else "",
+            "text": x.render(draft["text"], {"handle": handle, "name": known.get("name")})
+                    if draft else "",
+            "media": draw_media() or "",
+            "status": "pending",
+            # Whether this profile turned out to have a chat at all. Empty until
+            # the run reaches it, then "open" or "none" - the Chat column reads
+            # this, so the table says which handles are reachable and which are
+            # not without the operator opening a single profile by hand.
+            "chat": "",
+            "why": "",
+        })
+    return lanes, accounts
+
+
+@router.post("/api/campaign/plan")
+def plan(body: dict = Body(default={})) -> dict[str, Any]:
+    """The whole send, dealt out and shown, with nothing sent.
+
+    What the Campaign live panel opens on. Every recipient with the draft and
+    the picture they would get and a status of `pending` - which is the last
+    chance to see that four hundred DMs are about to go out with the wrong text
+    attached, at the point where the answer is still to close the panel.
+
+    It does not touch `_campaign`, so opening it during a run shows the plan
+    without disturbing the run - and `/status` is what the panel reads once
+    something IS running.
+    """
+    if _campaign["state"] == "running":
+        # A run owns the panel while it lasts: its rows have real statuses on
+        # them, and replacing those with a fresh set of `pending` would be
+        # throwing away the only record of what has already gone out.
+        return _state()
+
+    lanes, accounts = _plan_lanes(body, store.read())
+    total = sum(len(lane["rows"]) for lane in lanes)
+
+    # What today actually has room for. Said here rather than discovered one
+    # failed row at a time once the run is under way.
+    settings = store.settings()
+    counters = store.counters()
+    room = sum(_room_today(accounts, settings, counters).values())
+    room = min(room, max(0, int(settings["daily_dm_cap"]) - int(counters.get("total", 0))))
+    over = max(0, total - room)
+
+    note = (f"{total} recipients dealt across {len(accounts)} account"
+            f"{'' if len(accounts) == 1 else 's'} - nothing sent yet.")
+    if over:
+        note += (f" {over} of them are past today's cap and will be marked "
+                 f"failed rather than sent.")
+    return {"state": "planned", "lanes": lanes, "note": note}
+
+
+# -- The send ------------------------------------------------------
+@router.post("/api/campaign/start")
+def start(body: dict = Body(default={})) -> dict[str, Any]:
+    if _campaign["state"] == "running":
+        raise fail("A campaign is already running.")
+
+    db = store.read()
+    settings = store.settings()
+    lanes, accounts = _plan_lanes(body, db)
+
+    # Checked here as well as on the wizard's checklist. The checklist is a
+    # courtesy; this is the thing that cannot be got past, and a send that
+    # started against a closed window would fail on every single recipient.
+    closed = [a for a in accounts if not automation.is_open(str(a["id"]))]
+    if closed:
+        raise fail("No browser window is open on @" + closed[0]["login"] + ".")
+
+    total = sum(len(lane["rows"]) for lane in lanes)
+    with _lock:
+        _campaign["lanes"] = lanes
+        _campaign["state"] = "running"
+        _campaign["note"] = f"{total} recipients queued."
+
+    log("campaign", f"started - {total} recipients across {len(accounts)} account(s)")
+    task = tasks.start("campaign", lambda t: _run(t, settings), source="campaign")
+    _campaign["task"] = task.id
+    task.set(result=_state())
+    return {"task": task.id, "lanes": _state()["lanes"]}
+
+
+def _order() -> list[tuple[dict, dict]]:
+    """Round-robin across the lanes: lane 0 row 0, lane 1 row 0, lane 0 row 1...
+
+    Lane by lane would run one account's whole day's worth back to back and only
+    then start the second. Interleaving spreads the same work across the
+    accounts, which is both faster in wall-clock and the less peculiar pattern of
+    the two.
+    """
+    with _lock:
+        lanes = list(_campaign["lanes"])
+    out: list[tuple[dict, dict]] = []
+    depth = max((len(lane["rows"]) for lane in lanes), default=0)
+    for index in range(depth):
+        for lane in lanes:
+            if index < len(lane["rows"]):
+                out.append((lane, lane["rows"][index]))
+    return out
+
+
+def _run(task: tasks.Task, settings: dict[str, Any]) -> None:
+    queue = _order()
+    total = len(queue)
+    counters = store.counters()
+    sent_this_run = 0
+
+    daily_cap = int(settings["daily_dm_cap"])
+    per_account_cap = int(settings["per_account_dm_cap"])
+    batch_size = int(settings["batch_size"])
+    batch_pause = float(settings["batch_pause_minutes"]) * 60
+    gap = (float(settings["gap_min_seconds"]), float(settings["gap_max_seconds"]))
+    typing_wpm = int(settings["typing_wpm"])
+    click_send = bool(settings["click_send"])
+    follow_first = bool(settings["follow_before_dm"])
+    via_search = bool(settings["dm_via_search"])
+    chat_settle = float(settings["chat_open_seconds"])
+    stop_on_challenge = bool(settings["stop_on_challenge"])
+    template = str(settings["profile_url"])
+
+    def done_count() -> int:
+        return sum(1 for _, row in queue if row["status"] in ("sent", "typed", "failed"))
+
+    def report(row: Optional[dict] = None) -> None:
+        finished = done_count()
+        task.set(
+            progress=finished / total if total else 1.0,
+            detail=f"{finished} of {total}",
+            result=_state(),
+        )
+
+    try:
+        for lane, row in queue:
+            task.checkpoint()
+            account_id = lane["id"]
+            handle = row["handle"]
+
+            # -- the day's budget ---------------------------------
+            # A cap of 0 sends nothing. It is read literally rather than as
+            # "unlimited", because the two readings differ by a whole campaign
+            # and only one of them is safe to get wrong.
+            spent_today = counters["per_account"].get(account_id, 0)
+            if counters["total"] >= daily_cap:
+                row["status"] = "failed"
+                row["why"] = "the day's cap was reached"
+                report(row)
+                continue
+            if spent_today >= per_account_cap:
+                row["status"] = "failed"
+                row["why"] = f"{lane['account']} is at its cap for today"
+                report(row)
+                continue
+
+            # WHAT WAS PICKED IS WHAT IS TRIED. There used to be two gates here -
+            # "this handle's DMs were closed last time" and "this handle is
+            # protected" - and both failed a recipient before the profile was
+            # ever opened, on a fact the store had recorded on some earlier run.
+            # That is exactly backwards for a list the operator has just chosen by
+            # hand: picking a handle IS the instruction to try it, and a run that
+            # answers "failed - DMs are closed" without looking is reporting last
+            # week's reading as today's. It is also self-reinforcing, because a
+            # single wrong reading then excluded the handle from every campaign
+            # after it.
+            #
+            # Whether the chat is reachable is now ANSWERED rather than assumed:
+            # the profile is opened, the Chat column says "chat available" or "no
+            # chat available", and that is a fresh reading every time. To leave
+            # unreachable handles out of a run, filter them out when picking them
+            # in step 2 - which is where a decision about who to message belongs.
+            row["status"] = "processing"
+            report(row)
+
+            files = [str(config.MEDIA / row["media"])] if row["media"] else None
+            text = row["text"] or ""
+
+            def one(page, h=handle, t=text, f=files):
+                """Open the profile, open its chat if there is one, then write.
+
+                Two answers, not one: `None` means the profile had no chat to
+                open, which is a fact about the recipient and is what the Chat
+                column shows. Anything else is what became of the message.
+                """
+                if not x.open_chat(page, h, template=template,
+                                   follow_first=follow_first, via_search=via_search,
+                                   settle=chat_settle):
+                    return None
+                if not t and not f:
+                    # Nothing to write. The chat was opened, which was the whole
+                    # of the work asked for, so that is the outcome.
+                    return "typed"
+                return x.write_dm(page, t, media=f, typing_wpm=typing_wpm,
+                                  click_send=click_send)
+
+            try:
+                outcome = automation.with_page(account_id, one, timeout=900)
+
+                if outcome is None:
+                    # No chat button on the profile. Not an error and not worth a
+                    # slot out of the day's budget - it is written on the row and
+                    # the run moves straight on to the next handle.
+                    row["chat"] = "none"
+                    row["status"] = "failed"
+                    row["why"] = "no chat available"
+                    log("campaign", f"@{handle}: no chat available", "warn")
+                    report(row)
+                    # NOT written back to the store as `dm_open: False`. A button
+                    # that was not found is not the same as an inbox that is shut
+                    # - a slow render says the same thing as a closed inbox - and
+                    # a wrong False here is permanent: `skip_no_dm` would drop the
+                    # handle from every future campaign without opening it again.
+                    # The row says what this run saw; the store keeps what a
+                    # profile read actually established.
+                    continue
+
+                row["chat"] = "open"
+                row["status"] = outcome            # "sent", or "typed" with Click Send off
+                row["why"] = "chat available" if click_send else "chat available - not sent"
+                sent_this_run += 1
+                if outcome == "sent":
+                    # Only a real send spends the day's budget. X counts messages
+                    # it delivered, and a dry first run with Click Send off would
+                    # otherwise burn the cap it exists to protect - leaving the
+                    # operator to discover at the real run that the day is gone.
+                    counters["total"] += 1
+                    counters["per_account"][account_id] = spent_today + 1
+                    store.count_dm(account_id)
+
+                with store.edit() as db:
+                    for stored in db["store"]:
+                        if stored["handle"] == handle:
+                            # A tally, not a flag: the recipients picker
+                            # filters on "already messaged twice", and a
+                            # boolean cannot answer that. Read BEFORE the flag
+                            # below is set - the seed is what was true on the
+                            # way in, and reading it after would score a first
+                            # send as a second one. Seeded off `messaged` so a
+                            # handle marked before sends were counted reads as
+                            # one send rather than none.
+                            seen = int(stored.get("msg_count") or 0) or (
+                                1 if stored.get("messaged") else 0)
+                            # Only a real send marks the handle. With Click Send
+                            # off nothing was delivered, and a store that said
+                            # otherwise would quietly exclude them from the next
+                            # campaign.
+                            stored["messaged"] = stored.get("messaged") or click_send
+                            if click_send:
+                                stored["msg_count"] = seen + 1
+                            stored["last_at"] = now()
+                            break
+
+                log("campaign", f"{outcome} -> @{handle}")
+
+            except DmClosed as err:
+                row["chat"] = "none"
+                row["status"] = "failed"
+                row["why"] = str(err)
+                log("campaign", f"@{handle}: {err}", "warn")
+                # Learned the hard way, so the next campaign does not spend a
+                # slot finding it out again.
+                with store.edit() as db:
+                    for stored in db["store"]:
+                        if stored["handle"] == handle:
+                            stored["dm_open"] = False
+                            break
+
+            except AutomationError as err:
+                row["status"] = "failed"
+                row["why"] = str(err)
+                log("campaign", f"@{handle}: {err}", "error")
+                if stop_on_challenge and _is_challenge(err):
+                    # Carrying on through a captcha means submitting actions that
+                    # all silently fail, which is what escalates a challenge into
+                    # a lock.
+                    with _lock:
+                        _campaign["state"] = "stopped"
+                        _campaign["note"] = f"Stopped: {err}"
+                    task.set(result=_state())
+                    log("campaign", "stopped on a challenge", "error")
+                    return
+
+            except Exception as err:                 # noqa: BLE001 - one bad row is not the run
+                row["status"] = "failed"
+                row["why"] = str(err) or err.__class__.__name__
+                log("campaign", f"@{handle}: {row['why']}", "error")
+
+            report(row)
+
+            # -- pacing -------------------------------------------
+            remaining = done_count() < total
+            if remaining and sent_this_run and sent_this_run % batch_size == 0 and batch_pause > 0:
+                with _lock:
+                    _campaign["note"] = f"Batch of {batch_size} done - pausing."
+                task.set(detail=f"paused for {int(batch_pause / 60)} min", result=_state())
+                log("campaign", f"batch of {batch_size} done - pausing "
+                                f"{int(batch_pause / 60)} minutes")
+                task.checkpoint(batch_pause)
+            elif remaining:
+                task.checkpoint(random.uniform(*sorted(gap)))
+
+        failed = sum(1 for _, row in queue if row["status"] == "failed")
+        with _lock:
+            _campaign["state"] = "done"
+            _campaign["note"] = f"Finished - {failed} failed."
+        task.set(progress=1.0, result=_state())
+        log("campaign", f"finished - {total - failed} of {total} reached")
+
+    except tasks.Stopped:
+        with _lock:
+            _campaign["state"] = "stopped"
+            _campaign["note"] = "Ended. The recipients it did not reach stay unmessaged."
+        task.set(result=_state())
+        raise
+
+
+def _is_challenge(err: Exception) -> bool:
+    return bool(re.search(r"captcha|verification|locked|login wall", str(err), re.I))
+
+
+@router.get("/api/campaign/status")
+def status() -> dict[str, Any]:
+    return _state()
+
+
+@router.post("/api/campaign/pause")
+def pause() -> dict[str, Any]:
+    task = tasks.get(_campaign.get("task") or "")
+    if task:
+        task.pause()
+    with _lock:
+        _campaign["state"] = "paused"
+        # It finishes the recipient it is on. Cutting a DM off mid-composer
+        # would leave a half-typed message in a real inbox.
+        _campaign["note"] = "Paused. The recipient it was on finished first."
+    log("campaign", "paused", "warn")
+    return _state()
+
+
+@router.post("/api/campaign/resume")
+def resume() -> dict[str, Any]:
+    task = tasks.get(_campaign.get("task") or "")
+    if task:
+        task.resume()
+    with _lock:
+        _campaign["state"] = "running"
+        _campaign["note"] = "Running."
+    log("campaign", "resumed")
+    return _state()
+
+
+@router.post("/api/campaign/stop")
+def stop() -> dict[str, Any]:
+    task = tasks.get(_campaign.get("task") or "")
+    if task:
+        task.stop()
+    with _lock:
+        _campaign["state"] = "stopped"
+        _campaign["note"] = "Ended. The recipients it did not reach stay unmessaged."
+    log("campaign", "ended", "warn")
+    return _state()

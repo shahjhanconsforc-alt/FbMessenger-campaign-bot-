@@ -1,0 +1,544 @@
+"""Panel 3 - Scraping.
+
+The home timeline of every account picked for the run, walked without stopping.
+Gated behind an open browser window, because the feed is behind the login wall
+entirely - a sweep run without one does not fail, it collects nothing and reports
+that as the answer.
+
+SEVERAL ACCOUNTS AT ONCE, not one. Three windows open and two of them picked
+means two feeds being walked side by side, and the third left alone - which is
+the point of having three windows. Each account walks in its own thread against
+its own lane in `automation`, so they are genuinely simultaneous rather than
+taking turns; what makes that safe is that no two of them ever touch the same
+Chrome.
+
+They collect into ONE roster. Two home feeds overlap - the same account is
+followed by both - and a handle is a handle whichever window saw it first, so
+the run keeps one row per handle and remembers every account that walked for it.
+
+The page is always Home: there is no target to pick and no list to choose
+between, so nothing on the panel asks. And every handle not yet met is hovered
+for the profile card X pops up, because a timeline byline carries a name and
+nothing else - without the hover the roster is a column of handles with no way
+to triage it.
+
+The panel's live state (the rows so far, the lanes walking, the runs it has
+finished) is one object, and every task frame carries the whole of it. The run
+owns the roster: it decides what it found, and the console paints what it is
+handed rather than reassembling a table on its side from a percentage.
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body
+
+from .. import tasks
+from ..automation import firecrawl, x
+from ..automation.browser import automation
+from ..events import log
+from ..storage import object_name, objects
+from ..store import now, store
+from ._common import as_at, fail, open_accounts, working_account
+
+router = APIRouter()
+
+# The one thing a sweep walks. Kept in the shape a target has because everything
+# downstream - the roster key, the per-account provenance the Data panel filters
+# on - is written against that shape, and "Home timeline" is a perfectly honest
+# answer to "where did this handle come from".
+HOME_TARGET = {"key": "home", "name": "Home timeline", "mode": "home",
+               "note": "the feed of the accounts it runs as"}
+MODE = "home"
+
+# A run that does not stop collects more rows than a table can paint. The frame
+# carries the most recent slice and the true count beside it; the roster on disk
+# keeps every one of them.
+FRAME_ROWS = 500
+
+# The roster is written as the walk goes rather than at the end, because there is
+# no end - a run is finished by the operator pressing Stop, and everything up to
+# that press has to already be saved.
+SAVE_EVERY = 25
+
+# The open run. One at a time by design - not because of the browser any more,
+# but because there is one roster and one board, and two sweeps writing both
+# would each be reporting half of what the panel showed.
+#
+# `seen` is the roster itself, keyed by handle and in the order the accounts came
+# off the feeds - so the table is append-only and reads as the run's own
+# chronology rather than being regrouped every time a lane reports.
+_sweep: dict[str, Any] = {"target": None, "seen": {}, "lanes": [], "done": [],
+                          "task": None, "saved_at": 0}
+_lock = threading.Lock()
+
+
+def _state(**extra: Any) -> dict[str, Any]:
+    with _lock:
+        rows = list(_sweep["seen"].values())
+        lanes = [{"id": lane["id"], "account": lane["account"],
+                  "count": lane["count"], "running": lane["running"],
+                  "error": lane["error"]}
+                 for lane in _sweep["lanes"]]
+        frame = {
+            "target": _sweep["target"],
+            "mode": MODE,
+            "rows": rows[-FRAME_ROWS:],
+            "total": len(rows),
+            "lanes": lanes,
+            "done": list(_sweep["done"]),
+        }
+    frame.update(extra)
+    return frame
+
+
+def _rows() -> list[dict]:
+    with _lock:
+        return list(_sweep["seen"].values())
+
+
+def _running() -> Any:
+    task = tasks.get(_sweep.get("task") or "")
+    return task if task is not None and task.state in ("running", "paused") else None
+
+
+def _absorb(lane: dict, rows: list[dict]) -> None:
+    """Fold one lane's roster into the run's, and count what that lane has.
+
+    A handle both feeds carry is ONE row. Which lane saw it first decides where
+    it sits in the table; every read after that fills in whatever the first was
+    missing, because a row whose card had not come back yet when it was written
+    down should not stay blank for the rest of the run just because it was
+    written down early.
+    """
+    with _lock:
+        seen = _sweep["seen"]
+        lane["count"] = len(rows)
+        for row in rows:
+            handle = row.get("handle")
+            if not handle:
+                continue
+            found = seen.get(handle)
+            if found is None:
+                seen[handle] = dict(row)
+                continue
+            for field in ("name", "bio"):
+                if not found.get(field) and row.get(field):
+                    found[field] = row[field]
+            for field in ("followers", "dm_open"):
+                if found.get(field) is None and row.get(field) is not None:
+                    found[field] = row[field]
+
+
+def _keep(by: str) -> None:
+    """Write the run's roster to the store. One roster, whoever walked for it."""
+    rows = _rows()
+    if not rows:
+        return
+    store.put_roster(HOME_TARGET, MODE, rows, by)
+
+
+# -- The sweep -----------------------------------------------------
+def _picked(body: dict) -> list[dict[str, Any]]:
+    """The accounts this run walks: the ones asked for that have a window up.
+
+    `sessions` is the list the panel sends. `session` is the single-account
+    shape the panel used to send and the Actions panel still does. Neither given
+    means every open window, which is what pressing Scrape with nothing ticked
+    should do rather than nothing at all.
+    """
+    wanted = body.get("sessions")
+    if wanted is None and body.get("session") is not None:
+        wanted = [body["session"]]
+
+    live = open_accounts()
+    if not live:
+        raise fail("No browser window is open - open an account from the "
+                   "Accounts panel first.")
+    if not wanted:
+        return live
+
+    keys = {str(one) for one in wanted}
+    picked = [a for a in live if str(a["id"]) in keys]
+    if not picked:
+        raise fail("None of the accounts you picked have a browser window open.")
+    return picked
+
+
+@router.post("/api/scrape/sweep")
+def sweep(body: dict = Body(default={})) -> dict[str, str]:
+    """Walk every picked account's home timeline at once, until told to stop.
+
+    Returns a task id straight away. This run has no natural end, and no HTTP
+    request should be held open across one.
+    """
+    if _running() is not None:
+        raise fail("A scrape is already running - stop that one first.")
+
+    accounts = _picked(body)
+    by = ", ".join(as_at(account) for account in accounts)
+
+    settings = store.settings()
+    pause = (float(settings["scroll_pause_min"]), float(settings["scroll_pause_max"]))
+
+    with _lock:
+        _sweep["target"] = dict(HOME_TARGET)
+        _sweep["seen"] = {}
+        _sweep["saved_at"] = 0
+        _sweep["lanes"] = [{
+            "id": str(account["id"]),
+            "account": as_at(account),
+            "rows": [],
+            "count": 0,
+            "running": True,
+            "error": "",
+        } for account in accounts]
+
+    def total() -> int:
+        with _lock:
+            return len(_sweep["seen"])
+
+    def push(task: tasks.Task) -> None:
+        found = total()
+        task.set(detail=f"{found} accounts off {len(accounts)} feed"
+                        f"{'' if len(accounts) == 1 else 's'}",
+                 result=_state())
+
+    def walk(task: tasks.Task, account: dict[str, Any], lane: dict[str, Any]) -> None:
+        """One account's whole walk. Runs on its own thread, start to finish."""
+        account_id = str(account["id"])
+
+        def progress(rows: list[dict]) -> None:
+            # Painted as they arrive. A sweep that shows nothing for four minutes
+            # and then a full table is one nobody can tell from a hung one.
+            _absorb(lane, rows)
+            # Saved by the run rather than by the lane: the roster is shared, so
+            # the every-twenty-five is counted against the whole of it and not
+            # once per account.
+            with _lock:
+                found = len(_sweep["seen"])
+                due = found - _sweep["saved_at"] >= SAVE_EVERY
+                if due:
+                    _sweep["saved_at"] = found
+            if due:
+                _keep(by)
+            push(task)
+
+        try:
+            automation.with_page(
+                account_id,
+                lambda page: x.walk_home(
+                    page, pause=pause, on_rows=progress, checkpoint=task.checkpoint,
+                ),
+                timeout=None,
+            )
+        except tasks.Stopped:
+            # Stop was pressed. Not this lane's failure and not the run's - it is
+            # the run ending the way this run always ends.
+            pass
+        except Exception as err:                     # noqa: BLE001 - one dead lane is not the run
+            # One window thrown off the feed, or closed by hand, must not take
+            # the others down with it. It is recorded against its own lane and
+            # the rest keep walking.
+            lane["error"] = str(err) or err.__class__.__name__
+            log("scrape", f"{lane['account']}: {lane['error']}", "error")
+        finally:
+            lane["running"] = False
+            push(task)
+
+    def run(task: tasks.Task) -> None:
+        log("scrape", f"walking Home on {by} - hovering every new account")
+        task.set(detail=f"opening Home on {len(accounts)} account"
+                        f"{'' if len(accounts) == 1 else 's'}",
+                 result=_state())
+
+        walking = [
+            threading.Thread(target=walk, args=(task, account, lane),
+                             name=f"sweep-{account['id']}", daemon=True)
+            for account, lane in zip(accounts, _sweep["lanes"])
+        ]
+        for thread in walking:
+            thread.start()
+        try:
+            for thread in walking:
+                thread.join()
+        finally:
+            # Stop unwinds through here, and so does a window that ended its own
+            # lane. Either way the accounts already collected are the point of
+            # having run at all.
+            rows = _rows()
+            _keep(by)
+            with _lock:
+                _sweep["done"].insert(0, {
+                    "key": HOME_TARGET["key"], "name": HOME_TARGET["name"], "mode": MODE,
+                    "count": len(rows), "by": by,
+                })
+            log("scrape", f"home timeline on {by} -> {len(rows)} accounts",
+                "info" if rows else "warn")
+
+            # And out to the bucket. At the END, not as it goes: the object is
+            # the record of one walk, and rewriting it every twenty-five accounts
+            # would be the same file uploaded forty times to say what the last
+            # one says. Failure here is a warning, never the run's - a harvest
+            # that finished is not undone by a MinIO that was not up, and it is
+            # still on disk and still re-sendable from the Data panel.
+            sent = objects.put_roster(
+                rows,
+                name=object_name(f"{HOME_TARGET['key']}-{MODE}"),
+                source=HOME_TARGET["name"],
+                at=now(),
+            ) if rows else {"ok": False, "reason": "Nothing collected to send."}
+            # Why it ended, on the frame, because "stopped" and "X threw us off
+            # the feed" are different mornings and the board is where the
+            # operator reads which one this was.
+            how = "Stopped" if task.stopping else "Ended"
+            # Three endings worth telling apart, because "sent" and "sent
+            # nothing" are not the same answer and neither is a failure: the
+            # bucket keeps each handle once, so a walk that met only accounts it
+            # had met before is a normal, successful, empty upload.
+            if not sent.get("ok"):
+                where = ""
+            elif not sent.get("object"):
+                where = f" Nothing new for the bucket - all {sent['skipped']} were already in it."
+            else:
+                where = (f" Sent {sent['new']} new to {sent['bucket']}/{sent['object']}"
+                         + (f" ({sent['skipped']} already there)." if sent.get("skipped") else "."))
+            # A lane that died says so here rather than only in the feed: half a
+            # run is not the same answer as a whole one.
+            broke = [lane["account"] for lane in _sweep["lanes"] if lane["error"]]
+            trouble = f" {', '.join(broke)} stopped early." if broke else ""
+            task.set(result=_state(
+                note=f"{how} — {len(rows)} accounts collected and saved "
+                     f"across {len(accounts)} account"
+                     f"{'' if len(accounts) == 1 else 's'}.{where}{trouble}",
+                minio=sent,
+            ))
+
+        # After the frame is written, so the board is painted before the task
+        # stops being `running` and the console stops polling it.
+        if task.stopping:
+            raise tasks.Stopped()
+
+    task = tasks.start("scraping the home timeline", run, source="scrape")
+    with _lock:
+        _sweep["task"] = task.id
+    task.set(result=_state())
+    return {"task": task.id}
+
+
+@router.post("/api/scrape/stop")
+def stop() -> dict[str, Any]:
+    """End the walk - every lane of it.
+
+    They stop between rows, not mid-hover, and everything collected up to the
+    press is already on disk - so this throws nothing away.
+    """
+    task = _running()
+    if task is None:
+        raise fail("No scrape is running.")
+    task.stop()
+    log("scrape", "scrape ended by the operator", "warn")
+    return _state(note="Stopping - each account finishes the row it is on.")
+
+
+@router.post("/api/scrape/members")
+def members(body: dict = Body(default={})) -> dict[str, str]:
+    """Open each collected profile and fill in what the hover card did not carry.
+
+    Whether the inbox is open, above all: the card gives a bio and a follower
+    count without a page load, but nothing short of the profile itself says
+    whether a DM can reach the account. This is the expensive step - one page
+    load each - which is why it is a call of its own rather than part of the
+    walk: on five hundred accounts it is half an hour.
+
+    One account does the reading, whoever walked for the rows. A profile page
+    reads the same from any window, so there is nothing to gain from splitting it
+    and a second window's worth of page loads to lose.
+
+    Through Firecrawl when it is configured, which changes who does the reading:
+    the public facts come off Firecrawl's proxy and no window is needed at all,
+    so the re-read runs even with every account closed and spends none of them on
+    five hundred navigations. The one thing it cannot bring back is `dm_open` -
+    the inbox is only visible to a signed-in viewer - so a Firecrawl re-read
+    leaves whatever the walk or an earlier browser re-read learned about the
+    inbox standing rather than blanking it. To settle inboxes, turn Firecrawl off
+    (or leave it off) and re-read off a window.
+    """
+    if _running() is not None:
+        raise fail("The scrape is still running - stop it first.")
+
+    with _lock:
+        target = _sweep["target"]
+    rows = _rows()
+    if not target:
+        raise fail("Nothing has been scraped yet.")
+    if not rows:
+        raise fail("Nothing collected to re-read.")
+
+    template = str(store.settings()["profile_url"])
+    # Firecrawl reads off no account; the browser reads off exactly one. Deciding
+    # here keeps the loop from asking the question five hundred times, and means a
+    # Firecrawl re-read never touches `working_account` - which would refuse the
+    # run for want of a window the Firecrawl path does not use.
+    via_firecrawl = firecrawl.enabled()
+    if via_firecrawl:
+        account = None
+        account_id = None
+        by = "Firecrawl"
+    else:
+        account = working_account(body.get("session"))
+        account_id = str(account["id"])
+        by = as_at(account)
+
+    def read(handle: str) -> dict[str, Any]:
+        if via_firecrawl:
+            # No window, so no lane to post it to - the read is one HTTP call and
+            # runs right here on the task thread.
+            return x.read_profile(None, handle, template)
+        return automation.with_page(
+            account_id,
+            lambda page, h=handle: x.read_profile(page, h, template),
+            timeout=180,
+        )
+
+    def run(task: tasks.Task) -> None:
+        for index, row in enumerate(rows):
+            task.checkpoint()
+            try:
+                found = read(row["handle"])
+            except Exception as err:                 # noqa: BLE001 - one dead profile is not a run
+                log("scrape", f"@{row['handle']}: {err}", "warn")
+                task.set(progress=(index + 1) / len(rows), result=_state())
+                continue
+
+            with _lock:
+                kept = _sweep["seen"].get(row["handle"])
+                if kept is not None:
+                    # The row keeps its name and bio if the profile did not give
+                    # better ones: the hover card often carries the bio the
+                    # profile header truncates.
+                    kept["name"] = found.get("name") or kept.get("name") or ""
+                    kept["bio"] = found.get("bio") or kept.get("bio") or ""
+                    kept["followers"] = found.get("followers")
+                    # None means "this read could not tell" - a Firecrawl read
+                    # never sees the inbox - so it leaves the last known answer
+                    # standing rather than overwriting a real one with a blank.
+                    if found.get("dm_open") is not None:
+                        kept["dm_open"] = found.get("dm_open")
+                    kept["protected"] = found.get("protected", kept.get("protected", False))
+                    kept["missing"] = found.get("missing", False)
+
+            task.set(
+                progress=(index + 1) / len(rows),
+                detail=f"{index + 1} of {len(rows)} profiles",
+                result=_state(),
+            )
+            task.checkpoint(0.8)
+
+        _keep(by)
+        how = "via Firecrawl" if via_firecrawl else f"off {target['name']}"
+        log("scrape", f"re-read {len(rows)} profiles {how}")
+        task.set(result=_state())
+
+    task = tasks.start("re-reading accounts", run, source="scrape")
+    task.set(result=_state())
+    return {"task": task.id}
+
+
+@router.post("/api/scrape/open-all")
+def open_all(body: dict = Body(default={})) -> dict[str, str]:
+    """Open every collected profile in its own tab, to be read by eye."""
+    rows = _rows()
+    if not rows:
+        raise fail("Nothing to open.")
+
+    account = working_account(body.get("session"))
+    account_id = str(account["id"])
+    template = str(store.settings()["profile_url"])
+    handles = [r["handle"] for r in rows]
+
+    def run(task: tasks.Task) -> None:
+        done = 0
+
+        def one(context, handle: str) -> None:
+            x.open_profiles(context, [handle], template, checkpoint=task.checkpoint)
+
+        for handle in handles:
+            task.checkpoint()
+            automation.with_context(account_id, lambda c, h=handle: one(c, h), timeout=180)
+            done += 1
+            task.set(progress=done / len(handles), detail=f"{done} of {len(handles)}",
+                     result=_state())
+        log("browser", f"opened {done} profile tabs")
+
+    task = tasks.start("opening profiles", run, source="browser")
+    task.set(result=_state())
+    return {"task": task.id}
+
+
+@router.post("/api/scrape/close-tabs")
+def close_tabs(body: dict = Body(default={})) -> dict[str, Any]:
+    closed = 0
+    for account in store.read()["accounts"]:
+        account_id = str(account["id"])
+        if automation.is_open(account_id):
+            closed += automation.close_extra_tabs(account_id)
+    log("browser", f"closed {closed} profile tabs")
+    return {"ok": True, "closed": closed}
+
+
+@router.post("/api/scrape/reset")
+def reset() -> dict[str, Any]:
+    """Throw away the open run - not what it already saved.
+
+    The rosters it wrote stay in the Data panel. This clears the board, and a
+    button that also deleted the morning's collection would be one nobody could
+    press without checking first.
+    """
+    if _running() is not None:
+        raise fail("The scrape is still running - stop it first.")
+    with _lock:
+        _sweep["target"] = None
+        _sweep["seen"] = {}
+        _sweep["lanes"] = []
+        _sweep["done"] = []
+        _sweep["task"] = None
+        _sweep["saved_at"] = 0
+    log("scrape", "run reset", "warn")
+    return {"ok": True}
+
+
+@router.get("/api/scrape/status")
+def status() -> dict[str, Any]:
+    """The board, the lanes, and the walk if one is going.
+
+    A run that does not stop on its own will outlive the page that started it -
+    a reload, a second tab, a laptop lid. This is how the console finds the walk
+    again and picks the watch back up, instead of showing an idle panel over
+    browsers that are still scrolling.
+    """
+    task = _running()
+    return _state(task=task.id if task else None, running=task is not None)
+
+
+@router.get("/api/scrape/accounts")
+def accounts() -> dict[str, Any]:
+    """Which accounts a sweep could run on: the ones with a window up.
+
+    Read live off the browser rather than out of the store - a window the
+    operator closed by hand is closed, whatever the file says - and this is the
+    list the panel ticks off.
+    """
+    open_ones = open_accounts()
+    with _lock:
+        walking = {lane["id"]: lane for lane in _sweep["lanes"]}
+    return {"accounts": [{
+        "id": str(account["id"]),
+        "account": as_at(account),
+        "label": account.get("label", ""),
+        "count": walking.get(str(account["id"]), {}).get("count", 0),
+        "running": bool(walking.get(str(account["id"]), {}).get("running")),
+        "error": walking.get(str(account["id"]), {}).get("error", ""),
+    } for account in open_ones]}
