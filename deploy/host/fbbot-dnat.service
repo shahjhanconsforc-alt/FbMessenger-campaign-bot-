@@ -1,0 +1,12 @@
+[Unit]
+Description=DNAT forward host :30502 -> FB-messenger-bot console, :30903 -> its web desktop
+After=libvirtd.service network-online.target
+Wants=libvirtd.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fbbot-dnat.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

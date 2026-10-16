@@ -1,0 +1,33 @@
+# messenger-bot — production compose (one service: the console).
+#
+#   cp backend/.env.example backend/.env    # fill in MinIO + any overrides
+#   docker compose up -d --build
+#   → console on http://<vm>:4300
+#
+# Headed by default: Chrome is shown on the shared X display of the web desktop
+# (deploy/desktop/docker-compose.yml), which exports its /tmp/.X11-unix to
+# /srv/x11-shared on the VM. Set XBOT_HEADLESS=1 in backend/.env to run without
+# a desktop. The code is bind-mounted, so a deploy is `git pull` + restart;
+# backend/data (store, Chrome profiles, sessions, media) lives on the VM disk.
+services:
+  app:
+    build: .
+    image: messenger-bot:latest
+    container_name: messenger-bot
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    environment:
+      XBOT_HOST: "0.0.0.0"
+      XBOT_PORT: "4300"
+      DISPLAY: "${DISPLAY:-:1}"
+    ports:
+      - "4300:4300"
+    volumes:
+      - .:/app                              # run the checked-out code
+      - /srv/x11-shared:/tmp/.X11-unix      # the web desktop's display
+    shm_size: "512m"                        # Chrome needs more than Docker's 64 MB default
+    mem_limit: 1100m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

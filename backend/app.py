@@ -66,7 +66,7 @@ def _stamped(page: str) -> str:
 
 app = FastAPI(
     title="messenger-bot",
-    description="A local operator console for X. Everything it does, it does as you.",
+    description="Operator console for Facebook Messenger outreach. Everything it does, it does as you.",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )

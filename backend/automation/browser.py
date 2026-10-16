@@ -31,6 +31,7 @@ mirror the lanes keep up to date instead.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 from concurrent.futures import Future
@@ -221,6 +222,10 @@ class AutomationError(RuntimeError):
     """
 
 
+def _running_as_root() -> bool:
+    return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright
@@ -371,6 +376,10 @@ class _Lane:
                 # sets it; Playwright's `viewport` does not - see below.
                 "--window-size=1280,900",
                 f"--disable-features={_OFF}",
+                # In a container the server runs as root, and Chrome refuses
+                # to start its sandbox there ("Chromium sandboxing failed").
+                # On a desktop, as a normal user, the sandbox stays on.
+                *(["--no-sandbox"] if _running_as_root() else []),
             ],
             # Playwright adds `--enable-automation` to every launch, and Google
             # refuses to sign anybody in to a browser carrying it - the account

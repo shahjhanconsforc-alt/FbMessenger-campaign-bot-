@@ -1,0 +1,29 @@
+# The web desktop the bot's Chrome windows are shown on (VM deployment).
+#
+#   mkdir -p /srv/x11-shared && sudo chmod 1777 /srv/x11-shared
+#   cd deploy/desktop && docker compose up -d
+#   → https://<vm>:3001  (Selkies web desktop; Debian MATE)
+#
+# The desktop's X display (:1) is exported through /srv/x11-shared, which the
+# bot container mounts as /tmp/.X11-unix, so its Chrome windows open on this
+# desktop and can be watched and used (manual logins, 2FA) from a browser.
+services:
+  webtop:
+    image: lscr.io/linuxserver/webtop:debian-mate
+    container_name: webtop
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Karachi
+      TITLE: Messenger Bot Desktop
+    ports:
+      - "3000:3000"   # http
+      - "3001:3001"   # https (selkies)
+    volumes:
+      - ./config:/config                  # persistent desktop home
+      - /srv/x11-shared:/tmp/.X11-unix    # display :1, shared with the bot
+    shm_size: "512m"
+    mem_limit: 1100m
+    security_opt:
+      - seccomp:unconfined

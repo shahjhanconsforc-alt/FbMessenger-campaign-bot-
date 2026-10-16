@@ -18,3 +18,12 @@ node_modules/
 backend/data/
 
 *.tmp
+
+# Editor / stray backups — never commit these again.
+*.bak
+*.bak[0-9]
+*.xbak
+*.orig
+
+# The web desktop's persistent home (VM deployment).
+deploy/desktop/config/
