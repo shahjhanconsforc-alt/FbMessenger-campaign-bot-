@@ -15,6 +15,9 @@ services:
     image: messenger-bot:latest
     container_name: messenger-bot
     restart: unless-stopped
+    # Through sh, so the bind-mounted checkout works even when the file lost its
+    # executable bit (a clone made on Windows, or a strict umask).
+    entrypoint: ["sh", "/app/docker-entrypoint.sh"]
     env_file:
       - backend/.env
     environment:
