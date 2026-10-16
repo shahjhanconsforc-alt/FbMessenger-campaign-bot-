@@ -3611,7 +3611,14 @@ function renderStoredAccounts() {
 
   const offset = range ? range[0] : 1;
   const body = $('#store-table tbody');
-  body.innerHTML = rows.length ? rows.map((r, i) => `
+  // Draw at most RENDER_CAP rows. The LIST is still every row - camp.targets
+  // above holds them all and a run sends to all of them - but a table of
+  // twenty thousand <tr>s froze the tab for a minute and read as "nothing
+  // here" while the browser built it. The note under the last drawn row says
+  // how many more are on the list; Rows (a range) or a filter narrows it.
+  const drawn = rows.slice(0, RENDER_CAP);
+  const beyond = rows.length - drawn.length;
+  body.innerHTML = rows.length ? drawn.map((r, i) => `
     <tr>
       <td class="c-n">${offset + i}</td>
       <td>
@@ -3630,7 +3637,11 @@ function renderStoredAccounts() {
         ? `<span class="st sent" title="Already messaged ${sentCount(r)} time${
              sentCount(r) === 1 ? '' : 's'}">${sentCount(r)}×</span>`
         : '<span class="st none">—</span>'}</td>
-    </tr>`).join('')
+    </tr>`).join('') + (beyond
+      ? `<tr class="note"><td colspan="7" class="muted">…and ${beyond.toLocaleString()} more on the list `
+        + `(first ${RENDER_CAP} drawn; every one of the ${rows.length.toLocaleString()} is a recipient — `
+        + `set Rows or a filter to narrow it).</td></tr>`
+      : '')
     : `<tr class="note"><td colspan="7" class="muted">${
         store.rows.length
           ? 'Nothing matches those filters.'
@@ -3639,6 +3650,9 @@ function renderStoredAccounts() {
   paintPending();
   renderChecklist();
 }
+
+/* How many rows the recipients table draws at once. */
+const RENDER_CAP = 500;
 
 /* Which fields of a filter each group on the rail owns, and how a shut one says
  * what it is set to. Two maps rather than one so the "is this group doing
